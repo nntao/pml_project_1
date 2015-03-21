@@ -1,0 +1,274 @@
+---
+title: "pml_proj1"
+author: "Nengbing Tao"
+date: "Monday, March 21, 2015"
+output: html_document
+---
+
+
+###Summary
+
+Data collected using sensors during dumbbell lifting exercises are used to predict whether the activity is done properly. A random forest model is implemented that predicts the exercise classification with an out-of-sample accuracy of 99.9 %.
+
+###Background
+
+Data about personal activity obtained by using devices such as Jawbone Up, Nike FuelBand, and Fitbit can be used to assess the quality of excersizes and help improve health.  In this project, we use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants who were asked to perform barbell lifts correctly and incorrectly in 5 different ways, to classify the activities. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+
+
+###Data 
+
+The training data for this project are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here: 
+
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+Reference
+http://groupware.les.inf.puc-rio.br/har.
+
+<!--What you should submit
+
+The goal of your project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases. 
+
+1. Your submission should consist of a link to a Github repo with your R markdown and compiled HTML file describing your analysis. Please constrain the text of the writeup to < 2000 words and the number of figures to be less than 5. It will make it easier for the graders if you submit a repo with a gh-pages branch so the HTML page can be viewed online (and you always want to make it easy on graders :-).
+2. You should also apply your machine learning algorithm to the 20 test cases available in the test data above. Please submit your predictions in appropriate format to the programming assignment for automated grading. See the programming assignment for additional details. 
+
+Reproducibility 
+
+Due to security concerns with the exchange of R code, your code will not be run during the evaluation by your classmates. Please be sure that if they download the repo, they will be able to view the compiled HTML version of your analysis. 
+-->
+
+```{r message=FALSE,echo=FALSE}
+
+
+# if needs to reset cran mirror site, set it here and uncomment
+# r <- getOption("repos")
+# r["CRAN"] <- "http://cran.us.r-project.org"
+# options(repos = r)
+# rm(r)
+
+# install packages if not installed
+# http://stackoverflow.com/questions/4090169/elegant-way-to-check-for-missing-packages-and-install-them
+# Brian Spiering
+# List of packages for session
+.packages = c("dplyr","caret","data.table","reshape2","ggplot2")
+
+# Install CRAN packages (if not already installed)
+.inst <- .packages %in% installed.packages()
+
+if(length(.packages[!.inst]) > 0) install.packages(.packages[!.inst])
+
+# Load packages into session 
+lapply(.packages, require, character.only=TRUE)
+
+
+
+
+# set up working directory
+cwd <- getwd()
+dataDir <- "data"
+dir.create(file.path(cwd, dataDir))
+###setwd(file.path(cwd, subDir))
+
+#rm(list=ls())
+
+
+
+```
+
+
+###Preliminary exploration and feature selection
+
+```{r}
+
+trainingData_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv" 
+#trainingData <- read.table(trainingData_url,header=TRUE, sep=",", na.strings="NA", dec=".", strip.white=TRUE)
+trainingData_file <- "./data/pml-training.csv"
+
+
+testingData_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+#testingData <- read.table(testingData_url,header=TRUE, sep=",", na.strings="NA", dec=".", strip.white=TRUE)
+testingData_file <- "./data/pml-testing.csv"
+
+
+if(sum(dir("./data") == "pml-training.csv") == 0) {
+        download.file(trainingData_url,destfile=trainingData_file) 
+        download.file(testingData_url,destfile=testingData_file)
+}
+
+
+
+trainingData <- read.table(trainingData_file,header=TRUE, sep=",", na.strings="NA", dec=".", strip.white=TRUE)
+
+testingData <- read.table(testingData_file,header=TRUE, sep=",", na.strings="NA", dec=".", strip.white=TRUE)
+
+# user_name not linked to particular classe
+table(trainingData$user_name,trainingData$classe)
+
+# data structure difference in training and testing set
+head(trainingData[names(trainingData)!=names(testingData)])
+head(testingData[names(trainingData)!=names(testingData)])
+
+# make the traing and testing data sets to have the same columns and combine them for initial
+# processing to ensure same processing is applied to both sets, especially for columns that are factors
+# because there are cases one level might be missing from one set
+
+trainingData$problem_id <- sapply(as.integer(rownames(trainingData)),function(x){x+20L})
+testingData$classe<-NA
+
+#testingData<-cbind(testingData[,-160],problem_id=testingData$problem_id) # use the next line
+trainingData<-cbind(trainingData[,-160],classe=trainingData$classe) #so the classe column is last and not interfere with the cor column number
+
+
+allData <- rbind(trainingData,testingData) # testing with problem_id<=20, training problem_id>20
+
+suppressWarnings(allData[is.na(allData)] <- 0)  ## Change NA's to 0
+
+
+# user_name per se does not seem to be associated with a particular classe, include it in analysis
+# code user_name with number
+userNames <- levels(allData$user_name)
+users <- data.frame(user = sort(userNames), id = 1:length(userNames))
+allData$uu<-sapply(allData$user_name, function(x) {users[users$user==x,"id"]})
+
+
+# subset numeric columns
+nums <- sapply(allData,is.numeric)
+nums["classe"]<-TRUE # include classe
+
+allDataNum <- allData[,nums]
+
+# Removes columns that have near-zero variability
+nearZero <- nearZeroVar(allDataNum)
+allDataNoZero<- allDataNum[,-nearZero]
+
+
+
+# chech for correlated columns
+
+corrColumns <- findCorrelation(cor( allDataNoZero[sapply(allDataNoZero,is.numeric)]))
+corrColumns <- as.numeric(grep(pattern = 57, invert = T, value=T,corrColumns))
+
+allDataNoCorr<- allDataNoZero[,-corrColumns]
+names(allDataNoCorr)
+
+# colSums(is.na(allData)) == 0 # TRUE if column contains no NA
+# colSums(!is.na(allData)) == 0 # TRUE if column contains nothing other than NA
+# subsetColumns <- !(colSums(!is.na(allData)) == 0) # TRUE if column contains at least one value that is not NA
+
+
+
+
+```
+ 
+<!--
+how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+-->
+
+<!-- intersting read, could follow some of it later
+
+ref: http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf
+
+ Feature extraction and selection
+ 
+ "For feature extraction we used a sliding window approach
+with different lengths from 0.5 second to 2.5 seconds, with
+0.5 second overlap. In each step of the sliding window approach
+we calculated features on the Euler angles (roll, pitch
+and yaw), as well as the raw accelerometer, gyroscope and
+magnetometer readings. For the Euler angles of each of the
+four sensors we calculated eight features: mean, variance,
+standard deviation, max, min, amplitude, kurtosis and skewness,
+generating in total 96 derived feature sets.
+In order to identify the most relevant features we used the
+feature selection algorithm based on correlation proposed by
+Hall [14]. The algorithm was configured to use a "Best First"
+strategy based on backtracking. 17 features were selected:
+in the belt, were selected the mean and variance of the roll,
+maximum, range and variance of the accelerometer vector,
+variance of the gyro and variance of the magnetometer. In
+the arm, the variance of the accelerometer vector and the
+maximum and minimum of the magnetometer were selected.
+In the dumbbell, the selected features were the maximum of
+the acceleration, variance of the gyro and maximum and
+minimum of the magnetometer, while in the glove, the sum
+of the pitch and the maximum and minimum of the gyro
+were selected.
+"
+-->
+ 
+
+###Model fitting 
+```{r}
+
+#make training and test set from training data, and subset the final test data
+
+train2 <- allDataNoCorr %>% filter(problem_id>20)
+#dim(train2)
+#sort(names(train2))
+trainIndex = createDataPartition(train2$classe, p = 0.75,list=FALSE)
+
+training = train2[trainIndex,]
+testing = train2[-trainIndex,]
+
+finalTesting <- allDataNoCorr %>% filter(problem_id<=20)
+names(finalTesting)
+
+
+# built  model, use cross validation for training control and random forest algorithm
+
+set.seed(1212)
+# ignore column x as it seems to be just a series number, and problem_id 
+modFit <- train(classe ~ ., preProcess = c("center", "scale"), method = "rf", data = training[,c(-1,-50)], trControl = trainControl(method = "cv"))
+ 
+modFit
+
+```
+
+###Out of sample error
+```{r}
+
+
+# cross validation
+pred <- predict(modFit, testing[,c(-1,-50)])
+
+
+# estimation of the out of sample error
+
+confusionMatrix(pred, testing$classe)
+
+```
+###Conclusion
+
+Data collected from sensors on individuals who are exercising and on devices used are used to predict whether the exercises are performed appropriately. A random forest model using cross validation can reasonably classifies the exercises quite accurately.
+
+```{r}
+# final prediction
+finalPred <- predict(modFit, finalTesting[,c(-1,-50)])
+finalPred
+# 
+# 
+answers <- as.character(finalPred)
+answers
+#  [1] B A B A A E D B A A B C B A E E A B B B
+# Levels: A B C D E
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+# write the answer files in working directory
+#  
+#pml_write_files(answers)
+
+ 
+ 
+ ```
+ 
